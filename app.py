@@ -84,7 +84,7 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
     background: linear-gradient(135deg, #f5c518, #e6a817) !important;
     color: #0f0c29 !important; border: none !important;
     border-radius: 8px !important; font-weight: 600 !important;
-    font-size: 0.78rem !important; padding: 0.35rem 0 !important;
+    font-size: 0.95rem !important; padding: 0.6rem 0 !important;
     margin-top: 0.3rem !important; transition: opacity 0.2s !important;
 }
 .stButton > button:hover { opacity: 0.82 !important; }

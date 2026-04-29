@@ -339,43 +339,10 @@ st.markdown(
 )
 
 with st.spinner(f"Loading {selected_genre} movies..."):
-    # Use the analytics/recommend endpoint which supports genre filtering
-    genre_cards_raw, err = api_get(
-        "/analytics/recommend",
-        params={"genre": selected_genre, "min_rating": 5.0, "top_n": 50},
-    )
+    home_cards, err = api_get("/home", params={"category": "popular", "limit": 24})
 
-if err or not genre_cards_raw:
-    # Fallback: try TMDB discover via existing home endpoint with trending
-    with st.spinner("Loading movies..."):
-        fallback_cards, err2 = api_get("/home", params={"category": "popular", "limit": 24})
-    if err2 or not fallback_cards:
-        st.warning("⚠️ Could not load movies. Make sure FastAPI backend is running on port 8000.")
-        st.stop()
-    poster_grid(fallback_cards, cols=grid_cols, key_prefix="home_fallback")
-else:
-    # Convert analytics/recommend response items to poster_grid format
-    # The endpoint returns {total_found, top_picks, highest_rated, trending}
-    # We merge top_picks + highest_rated and deduplicate by tmdb_id
-    seen_ids  = set()
-    all_cards = []
-    for bucket in ("top_picks", "highest_rated", "trending"):
-        for item in genre_cards_raw.get(bucket, []):
-            # Items from analytics/recommend don't have tmdb_id directly;
-            # we need to look them up. Instead use the /tmdb/search per title.
-            # To keep it fast, build display cards from what we have.
-            title = item.get("title", "")
-            key   = title.lower().strip()
-            if key and key not in seen_ids:
-                seen_ids.add(key)
-                all_cards.append({
-                    "tmdb_id":      item.get("tmdb_id"),  # None se change kiya
-                    "title":        title,
-                    "poster_url":   item.get("poster_url"),
-                    "vote_average": item.get("vote_average"),
-})  
+if err or not home_cards:
+    st.warning("Could not load movies.")
+    st.stop()
 
-    if all_cards:
-        poster_grid(all_cards[:24], cols=grid_cols, key_prefix="genre_feed")
-    else:
-        st.info(f"No movies found for genre '{selected_genre}'. Try another genre.")
+poster_grid(home_cards, cols=grid_cols, key_prefix="home_feed")

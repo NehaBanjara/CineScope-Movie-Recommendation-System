@@ -369,11 +369,11 @@ else:
             if key and key not in seen_ids:
                 seen_ids.add(key)
                 all_cards.append({
-                    "tmdb_id":      None,   # no tmdb_id in this response
+                    "tmdb_id":      item.get("tmdb_id"),  # None se change kiya
                     "title":        title,
                     "poster_url":   item.get("poster_url"),
                     "vote_average": item.get("vote_average"),
-                })
+})  
 
     if all_cards:
         poster_grid(all_cards[:24], cols=grid_cols, key_prefix="genre_feed")

@@ -3,9 +3,9 @@ import requests
 import streamlit as st
 
 # ==============================
-# CONFIG
+# CONFIG — LOCAL ONLY
 # ==============================
-API_BASE = os.getenv("API_BASE", "https://cinescope-movie-recommendation-system.onrender.com")
+API_BASE = "http://127.0.0.1:8000"
 TMDB_IMG = "https://image.tmdb.org/t/p/w500"
 
 st.set_page_config(
@@ -43,7 +43,7 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
     background: linear-gradient(135deg, #f5c518, #e6a817) !important;
     color: #0f0c29 !important; border: none !important;
     border-radius: 8px !important; font-weight: 600 !important;
-    font-size: 0.78rem !important; padding: 0.35rem 0 !important;
+    font-size: 0.95rem !important; padding: 0.6rem 0 !important;
     margin-top: 0.3rem !important; transition: opacity 0.2s !important;
 }
 .stButton > button:hover { opacity: 0.82 !important; }
@@ -97,7 +97,7 @@ if "selected_tmdb_id" not in st.session_state:
 @st.cache_data(ttl=300)
 def api_get(path: str, params: dict | None = None):
     try:
-        r = requests.get(f"{API_BASE}{path}", params=params, timeout=120)
+        r = requests.get(f"{API_BASE}{path}", params=params, timeout=30)
         if r.status_code >= 400:
             return None, f"HTTP {r.status_code}: {r.text[:300]}"
         return r.json(), None
@@ -115,11 +115,6 @@ def stars(rating):
 
 
 def poster_grid(cards, cols=5, key_prefix="grid"):
-    """
-    Renders a grid of movie cards.
-    Each card shows: poster image, star rating, title, and an Open button.
-    Clicking Open loads that movie's detail page.
-    """
     if not cards:
         st.info("No movies to show.")
         return
@@ -143,7 +138,6 @@ def poster_grid(cards, cols=5, key_prefix="grid"):
                 if rating:
                     st.markdown(f"<div class='movie-card-rating'>{stars(rating)}</div>", unsafe_allow_html=True)
                 st.markdown(f"<div class='movie-card-title'>{title}</div>", unsafe_allow_html=True)
-                # FIX: show Open button even when tmdb_id is None — search by title as fallback
                 btn_key = f"{key_prefix}_{r}_{c}_{idx}_{tmdb_id or title[:8]}"
                 if st.button("▶ Open", key=btn_key):
                     if tmdb_id:
@@ -151,7 +145,6 @@ def poster_grid(cards, cols=5, key_prefix="grid"):
                         st.session_state.selected_tmdb_id = int(tmdb_id)
                         st.rerun()
                     else:
-                        # tmdb_id missing — look it up by title then navigate
                         with st.spinner("Looking up movie..."):
                             search_result, _ = api_get("/tmdb/search", params={"query": title})
                         if search_result and search_result.get("results"):
@@ -165,16 +158,10 @@ def poster_grid(cards, cols=5, key_prefix="grid"):
 
 
 def to_cards_from_tfidf_items(tfidf_items):
-    """
-    Converts TF-IDF recommendation items into poster_grid-compatible dicts.
-    TF-IDF items come from the local movie dataset and include a nested
-    'tmdb' object with real TMDB metadata (id, poster, rating).
-    """
     cards = []
     for x in tfidf_items or []:
         tmdb = x.get("tmdb") or {}
         cards.append({
-            # Use TMDB id if available; None triggers title-based lookup in poster_grid
             "tmdb_id":      tmdb.get("tmdb_id"),
             "title":        tmdb.get("title") or x.get("title") or "Untitled",
             "poster_url":   tmdb.get("poster_url"),
@@ -202,10 +189,8 @@ with st.sidebar:
         st.switch_page("pages/analytics.py")
 
     st.markdown("---")
-
     st.markdown("<p style='color:#718096; font-size:0.75rem; font-weight:600; letter-spacing:1px; margin-bottom:0.4rem'>GRID COLUMNS</p>", unsafe_allow_html=True)
     grid_cols = st.slider("cols", 3, 8, 5, label_visibility="collapsed")
-
     st.markdown("---")
 
     st.markdown("""
@@ -288,33 +273,16 @@ with right:
     st.markdown("</div>", unsafe_allow_html=True)
 
 
-# ======================================================================
+# ==============================
 # RECOMMENDATIONS
-# ----------------------------------------------------------------------
-# What this section is supposed to show:
-#
-# 1. TF-IDF Similar Movies — movies that are textually similar to the
-#    selected movie based on genres, keywords, and overview text.
-#    These come from your local 45k-movie dataset via the ML model.
-#    Example: open "Inception" → shows "Interstellar", "The Matrix" etc.
-#
-# 2. More in This Genre — popular movies in the same genre, fetched live
-#    from TMDB's discover API. These are NOT from the local dataset.
-#    Example: open "Inception" (Sci-Fi) → shows popular Sci-Fi movies.
-#
-# The genre filter dropdown lets you narrow the TMDB genre results.
-# TF-IDF results are always shown as-is (they don't carry genre tags).
-# ======================================================================
+# ==============================
 st.markdown("<div style='height:1.5rem'></div>", unsafe_allow_html=True)
 st.markdown("<div class='section-label'>✨ You Might Also Like</div>", unsafe_allow_html=True)
 
-# Genre filter — only applied to "More in This Genre" section
 CATEGORIES = ["All", "Action", "Drama", "Comedy", "Horror", "Romance", "Thriller", "Adventure"]
 sel_cat = st.selectbox(
     "Filter 'More in This Genre' by category",
-    CATEGORIES,
-    index=0,
-    key="rec_category_filter",
+    CATEGORIES, index=0, key="rec_category_filter",
 )
 
 movie_title = (data.get("title") or "").strip()
@@ -329,15 +297,7 @@ with st.spinner("Finding similar movies..."):
         params={"query": movie_title, "tfidf_top_n": 18, "genre_limit": 18},
     )
 
-# ── CASE 1: /movie/search succeeded ────────────────────────────────────────
 if not err2 and bundle:
-
-    # ── Section A: TF-IDF cards ──────────────────────────────────────────
-    # These are movies similar in content to the selected movie.
-    # They are matched using TF-IDF on your local 45k-movie dataset.
-    # ROOT CAUSE FIX: previously these cards often had tmdb_id = None
-    # and the Open button was suppressed, making the whole section look blank.
-    # Now the button does a title-based TMDB lookup as fallback (see poster_grid).
     tfidf_cards = to_cards_from_tfidf_items(bundle.get("tfidf_recommendations", []))
 
     if tfidf_cards:
@@ -347,20 +307,9 @@ if not err2 and bundle:
         st.markdown("<div class='rec-header'>🔎 Similar Movies</div>", unsafe_allow_html=True)
         st.caption("No TF-IDF matches found for this title in the local dataset.")
 
-    # ── Section B: Genre recommendations ─────────────────────────────────
-    # These are popular movies in the same genre, fetched live from TMDB.
-    # ROOT CAUSE FIX: the old code tried to filter these by a "genres" field
-    # that does NOT exist on TMDBMovieCard objects — they only have
-    # tmdb_id, title, poster_url, release_date, vote_average.
-    # Filtering by genres field always returned an empty list → blank section.
-    # Fix: genre filter is now only applied when the user explicitly picks
-    # a non-"All" category, and only searches in the title as a heuristic.
     genre_cards = bundle.get("genre_recommendations", [])
-
     if sel_cat != "All":
-        # Heuristic: filter by title keyword since genre field is not available here
         filtered = [c for c in genre_cards if sel_cat.lower() in str(c.get("title", "")).lower()]
-        # Always fall back to full list if filter is too aggressive
         genre_cards = filtered if filtered else genre_cards
 
     if genre_cards:
@@ -369,7 +318,6 @@ if not err2 and bundle:
     else:
         st.caption("No genre recommendations available for this movie.")
 
-# ── CASE 2: /movie/search failed — use genre fallback ──────────────────────
 else:
     st.markdown("<div class='rec-header'>🎭 Genre Recommendations</div>", unsafe_allow_html=True)
     with st.spinner("Loading genre recommendations..."):
@@ -378,4 +326,4 @@ else:
     if not err3 and genre_only:
         poster_grid(genre_only, cols=grid_cols, key_prefix="fallback_genre")
     else:
-        st.info("No recommendations available right now. The ML backend may still be loading — wait 30 seconds and refresh.")
+        st.info("No recommendations available right now. Wait 30 seconds and refresh.")

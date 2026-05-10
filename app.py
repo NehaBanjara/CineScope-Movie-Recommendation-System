@@ -3,9 +3,9 @@ import requests
 import streamlit as st
 
 # ==============================
-# CONFIG
+# CONFIG — LOCAL ONLY
 # ==============================
-API_BASE = os.getenv("API_BASE", "https://cinescope-movie-recommendation-system.onrender.com")
+API_BASE = "http://127.0.0.1:8000"
 TMDB_IMG = "https://image.tmdb.org/t/p/w500"
 
 st.set_page_config(
@@ -16,7 +16,7 @@ st.set_page_config(
 )
 
 # ==============================
-# STYLES  (unchanged)
+# STYLES
 # ==============================
 st.markdown("""
 <style>
@@ -114,7 +114,7 @@ if "selected_tmdb_id" not in st.session_state:
 @st.cache_data(ttl=300)
 def api_get(path: str, params: dict | None = None):
     try:
-        r = requests.get(f"{API_BASE}{path}", params=params, timeout=120)
+        r = requests.get(f"{API_BASE}{path}", params=params, timeout=30)
         if r.status_code >= 400:
             return None, f"HTTP {r.status_code}: {r.text[:300]}"
         return r.json(), None
@@ -214,18 +214,21 @@ def parse_tmdb_search_to_cards(data, keyword: str, limit: int = 24):
     ]
     return suggestions, cards
 
-# ==============================
-# GENRE LIST  (fetched from backend overview, cached)
-# ==============================
+
 @st.cache_data(ttl=600)
 def get_genre_list():
     data, err = api_get("/analytics/overview")
     if err or not data:
-        # Fallback static list if backend overview endpoint not available
         return ["Action", "Adventure", "Animation", "Comedy", "Crime",
                 "Drama", "Family", "Fantasy", "Horror", "Romance",
                 "Science Fiction", "Thriller"]
     return [g["genre"] for g in data.get("genre_stats", [])]
+
+
+@st.cache_data(ttl=300)
+def fetch_genre_movies(genre: str, limit: int = 24):
+    return api_get("/home/genre", params={"genre": genre, "limit": limit})
+
 
 # ==============================
 # SIDEBAR
@@ -243,26 +246,16 @@ with st.sidebar:
     st.markdown("<p style='color:#718096; font-size:0.75rem; font-weight:600; letter-spacing:1px; margin-bottom:0.4rem'>GRID COLUMNS</p>", unsafe_allow_html=True)
     grid_cols = st.slider("cols", 3, 8, 5, label_visibility="collapsed")
 
-    # FIX 3: Genre-based home feed — replaces the old "Home Category" selectbox
     st.markdown("<p style='color:#718096; font-size:0.75rem; font-weight:600; letter-spacing:1px; margin: 0.9rem 0 0.4rem'>BROWSE BY GENRE</p>", unsafe_allow_html=True)
-    genre_list    = get_genre_list()
-    selected_genre = st.selectbox(
-        "genre",
-        genre_list,
-        index=0,
-        label_visibility="collapsed",
-    )
+    genre_list     = get_genre_list()
+    selected_genre = st.selectbox("genre", genre_list, index=0, label_visibility="collapsed")
 
     st.markdown("---")
-    # Navigation to Analytics Dashboard
     st.markdown("<p style='color:#718096; font-size:0.75rem; font-weight:600; letter-spacing:1px; margin-bottom:0.5rem'>TOOLS</p>", unsafe_allow_html=True)
     if st.button("📊 Analytics Dashboard", use_container_width=True):
-        # FIX 1: correct path — file is analytics.py not Analytics.py
         st.switch_page("pages/analytics.py")
 
     st.markdown("---")
-
-    # FIX 4: Human-friendly about section
     st.markdown("""
     <div style='background:#12121a; border:1px solid #2a2a3d; border-radius:14px; padding:1rem 1.1rem; margin-top:0.5rem'>
         <div style='font-size:0.78rem; color:#8888a8; line-height:1.8'>
@@ -304,7 +297,7 @@ if query:
             data, err = api_get("/tmdb/search", params={"query": query})
 
         if err or data is None:
-            st.warning("⚠️ Could not reach movie database. Check your internet connection.")
+            st.warning("⚠️ Could not reach movie database. Make sure FastAPI is running on port 8000.")
         else:
             suggestions, cards = parse_tmdb_search_to_cards(data, query, limit=24)
 
@@ -329,9 +322,7 @@ if query:
     st.stop()
 
 # ==============================
-# FIX 3: GENRE-BASED HOME FEED
-# Replaces the old trending/popular/top_rated category dropdown.
-# Uses /discover/genre endpoint from TMDB via backend.
+# GENRE-BASED HOME FEED
 # ==============================
 st.markdown(
     f"<div class='section-label'>🎭 {selected_genre} Movies</div>",
@@ -339,10 +330,10 @@ st.markdown(
 )
 
 with st.spinner(f"Loading {selected_genre} movies..."):
-    home_cards, err = api_get("/home", params={"category": "popular", "limit": 24})
+    home_cards, err = fetch_genre_movies(selected_genre, limit=24)
 
 if err or not home_cards:
-    st.warning("Could not load movies.")
+    st.warning(f"Could not load {selected_genre} movies. Make sure FastAPI is running on http://127.0.0.1:8000")
     st.stop()
 
 poster_grid(home_cards, cols=grid_cols, key_prefix="home_feed")

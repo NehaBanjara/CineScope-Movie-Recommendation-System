@@ -29,19 +29,18 @@ if not TMDB_API_KEY:
 # =========================
 # FASTAPI APP
 # =========================
-app = FastAPI(title="Movie Recommender API", version="4.0")
+app = FastAPI(title="CineScope Movie Recommender API", version="1.0")
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
 # =========================
-# PICKLE GLOBALS
+# PICKLE PATHS
 # =========================
 BASE_DIR          = os.path.dirname(os.path.abspath(__file__))
 DF_PATH           = os.path.join(BASE_DIR, "df.pkl")
@@ -49,16 +48,43 @@ INDICES_PATH      = os.path.join(BASE_DIR, "indices.pkl")
 TFIDF_MATRIX_PATH = os.path.join(BASE_DIR, "tfidf_matrix.pkl")
 TFIDF_PATH        = os.path.join(BASE_DIR, "tfidf.pkl")
 
-df:           Optional[pd.DataFrame] = None
-indices_obj:  Any                    = None
-tfidf_matrix: Any                    = None
-tfidf_obj:    Any                    = None
+df:           Optional[pd.DataFrame]   = None
+indices_obj:  Any                      = None
+tfidf_matrix: Any                      = None
+tfidf_obj:    Any                      = None
 TITLE_TO_IDX: Optional[Dict[str, int]] = None
 _load_lock  = threading.Lock()
 
 
 # =========================
-# MODELS — existing
+# TMDB Genre Name to ID map
+# =========================
+GENRE_NAME_TO_ID: Dict[str, int] = {
+    "Action":            28,
+    "Adventure":         12,
+    "Animation":         16,
+    "Comedy":            35,
+    "Crime":             80,
+    "Documentary":       99,
+    "Drama":             18,
+    "Family":         10751,
+    "Fantasy":           14,
+    "History":           36,
+    "Horror":            27,
+    "Music":          10402,
+    "Mystery":         9648,
+    "Romance":        10749,
+    "Science":          878,
+    "Fiction":          878,
+    "Science Fiction":  878,
+    "Thriller":          53,
+    "War":            10752,
+    "Western":           37,
+}
+
+
+# =========================
+# MODELS
 # =========================
 class TMDBMovieCard(BaseModel):
     tmdb_id:      int
@@ -87,13 +113,9 @@ class SearchBundleResponse(BaseModel):
     tfidf_recommendations: List[TFIDFRecItem]
     genre_recommendations: List[TMDBMovieCard]
 
-
-# =========================
-# MODELS — analytics (new)
-# =========================
 class RatingBucket(BaseModel):
-    range:  str
-    count:  int
+    range: str
+    count: int
 
 class GenreStat(BaseModel):
     genre:      str
@@ -107,21 +129,21 @@ class MovieRow(BaseModel):
     genres:       str
 
 class OverviewStats(BaseModel):
-    total_movies:  int
-    avg_rating:    float
+    total_movies:   int
+    avg_rating:     float
     avg_popularity: float
-    pct_high:      float          # % rated >= 7
-    rating_dist:   List[RatingBucket]
-    genre_stats:   List[GenreStat]
-    top10_popular: List[MovieRow]
+    pct_high:       float
+    rating_dist:    List[RatingBucket]
+    genre_stats:    List[GenreStat]
+    top10_popular:  List[MovieRow]
 
 class FilteredStats(BaseModel):
-    total:         int
-    avg_rating:    float
-    avg_popularity: float
-    pct_high:      float
-    rating_dist:   List[RatingBucket]
-    popularity_by_rating: List[dict]  # [{rating_group, avg_popularity}]
+    total:                int
+    avg_rating:           float
+    avg_popularity:       float
+    pct_high:             float
+    rating_dist:          List[RatingBucket]
+    popularity_by_rating: List[dict]
 
 class RecommendItem(BaseModel):
     title:        str
@@ -131,10 +153,10 @@ class RecommendItem(BaseModel):
     poster_url:   Optional[str] = None
 
 class RecommendResponse(BaseModel):
-    total_found:  int
-    top_picks:    List[RecommendItem]
+    total_found:   int
+    top_picks:     List[RecommendItem]
     highest_rated: List[RecommendItem]
-    trending:     List[RecommendItem]
+    trending:      List[RecommendItem]
 
 class CompareMovieData(BaseModel):
     title:        str
@@ -163,9 +185,8 @@ def make_img_url(path: Optional[str]) -> Optional[str]:
 
 
 async def tmdb_get(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
-    q         = {**params, "api_key": TMDB_API_KEY}
-    transport = httpx.AsyncHTTPTransport(retries=3)
-    async with httpx.AsyncClient(transport=transport, timeout=15, verify=False) as client:
+    q = {**params, "api_key": TMDB_API_KEY}
+    async with httpx.AsyncClient(timeout=15, verify=False) as client:
         try:
             r = await client.get(f"{TMDB_BASE}{path}", params=q)
         except httpx.RequestError as exc:
@@ -218,7 +239,6 @@ async def tmdb_search_first(query: str) -> Optional[dict]:
 
 
 async def tmdb_poster_for_title(title: str) -> Optional[str]:
-    """Fetch poster URL for a local dataset title via TMDB search."""
     try:
         m = await tmdb_search_first(title)
         if m and m.get("poster_path"):
@@ -253,11 +273,9 @@ def tfidf_recommend_titles(query_title: str, top_n: int = 10) -> List[Tuple[str,
     idx = get_local_idx(query_title)
     if idx is None:
         return []
-
     qv     = tfidf_matrix[idx]
     scores = (tfidf_matrix @ qv.T).toarray().ravel()
     order  = np.argsort(-scores)
-
     out: List[Tuple[str, float]] = []
     for i in order:
         if int(i) == idx:
@@ -289,7 +307,7 @@ async def attach_tmdb_card(title: str) -> Optional[TMDBMovieCard]:
 
 
 # =========================
-# ANALYTICS HELPERS (pure pandas — no HTTP)
+# ANALYTICS HELPERS
 # =========================
 def _ensure_df():
     if df is None:
@@ -321,12 +339,7 @@ def _genre_stats(frame: pd.DataFrame) -> List[GenreStat]:
     return result
 
 
-def _apply_filters(
-    min_rating: float,
-    max_rating: float,
-    genre: str,
-    min_pop: float,
-) -> pd.DataFrame:
+def _apply_filters(min_rating: float, max_rating: float, genre: str, min_pop: float) -> pd.DataFrame:
     _ensure_df()
     mask = (
         (df["vote_average"] >= min_rating) &
@@ -340,7 +353,7 @@ def _apply_filters(
 
 
 # =========================
-# LAZY LOAD
+# LAZY LOAD ML DATA
 # =========================
 def ensure_data_loaded():
     global df, indices_obj, tfidf_matrix, tfidf_obj, TITLE_TO_IDX
@@ -361,7 +374,7 @@ def ensure_data_loaded():
             with open(path, "rb") as f:
                 return pickle.load(f, encoding="latin1")
 
-        _raw          = _pkl(DF_PATH)
+        _raw = _pkl(DF_PATH)
         _raw["popularity"]   = pd.to_numeric(_raw["popularity"],   errors="coerce").fillna(0)
         _raw["vote_average"] = pd.to_numeric(_raw["vote_average"], errors="coerce")
         _raw = _raw.dropna(subset=["vote_average"])
@@ -372,7 +385,7 @@ def ensure_data_loaded():
         tfidf_matrix = _pkl(TFIDF_MATRIX_PATH)
         tfidf_obj    = _pkl(TFIDF_PATH)
         TITLE_TO_IDX = build_title_to_idx_map(indices_obj)
-        print("ML data loaded ✅")
+        print("ML data loaded successfully!")
 
 
 # =========================
@@ -384,13 +397,8 @@ async def startup_event():
 
 
 # =========================
-# EXISTING ROUTES (unchanged)
+# ROUTES
 # =========================
-@app.get("/health")
-def health():
-    return {"status": "ok", "ml_loaded": df is not None}
-
-
 @app.get("/home", response_model=List[TMDBMovieCard])
 async def home(
     category: str = Query("popular"),
@@ -408,6 +416,45 @@ async def home(
         raise
     except Exception as e:
         raise HTTPException(500, f"Home route failed: {e}")
+
+
+@app.get("/home/genre", response_model=List[TMDBMovieCard])
+async def home_by_genre(
+    genre: str = Query(...),
+    limit: int = Query(24, ge=1, le=50),
+    page:  int = Query(1,  ge=1, le=5),
+):
+    try:
+        genre_id = GENRE_NAME_TO_ID.get(genre)
+        if not genre_id:
+            for key, gid in GENRE_NAME_TO_ID.items():
+                if key.lower() in genre.lower() or genre.lower() in key.lower():
+                    genre_id = gid
+                    break
+        # Hardcoded fallbacks for genres that sometimes miss
+        if not genre_id:
+            hardcoded = {
+                "horror": 27, "comedy": 35, "action": 28,
+                "drama": 18, "thriller": 53, "romance": 10749,
+                "animation": 16, "fantasy": 14, "crime": 80,
+                "adventure": 12, "family": 10751, "mystery": 9648,
+                "history": 36, "war": 10752, "western": 37,
+                "music": 10402, "documentary": 99,
+            }
+            genre_id = hardcoded.get(genre.lower())
+        if not genre_id:
+            data = await tmdb_get("/movie/popular", {"language": "en-US", "page": page})
+            return await tmdb_cards_from_results(data.get("results", []), limit=limit)
+        data = await tmdb_get(
+            "/discover/movie",
+            {"with_genres": genre_id, "language": "en-US", "sort_by": "popularity.desc",
+             "page": page, "vote_count.gte": 50},
+        )
+        return await tmdb_cards_from_results(data.get("results", []), limit=limit)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Genre home route failed: {e}")
 
 
 @app.get("/tmdb/search")
@@ -465,9 +512,8 @@ async def search_bundle(
     tmdb_id = int(best["id"])
     details = await tmdb_movie_details(tmdb_id)
 
-    recs = tfidf_recommend_titles(details.title, top_n=tfidf_top_n) \
-        or tfidf_recommend_titles(query, top_n=tfidf_top_n)
-
+    recs  = tfidf_recommend_titles(details.title, top_n=tfidf_top_n) \
+         or tfidf_recommend_titles(query, top_n=tfidf_top_n)
     cards = await asyncio.gather(*[attach_tmdb_card(t) for t, _ in recs])
 
     tfidf_items = [
@@ -494,25 +540,18 @@ async def search_bundle(
 
 
 # =========================
-# NEW — ANALYTICS ROUTES
+# ANALYTICS ROUTES
 # =========================
-
 @app.get("/analytics/overview", response_model=OverviewStats)
 def analytics_overview():
-    """
-    Global stats computed once from the full dataset.
-    Used by dashboard Overview tab and KPI banner.
-    """
     ensure_data_loaded()
     _ensure_df()
-
-    total        = len(df)
-    avg_rating   = round(float(df["vote_average"].mean()), 2)
-    avg_pop      = round(float(df["popularity"].mean()), 2)
-    pct_high     = round(len(df[df["vote_average"] >= 7]) / total * 100, 1)
-    rating_dist  = _rating_dist(df)
-    genre_stats  = _genre_stats(df)
-
+    total       = len(df)
+    avg_rating  = round(float(df["vote_average"].mean()), 2)
+    avg_pop     = round(float(df["popularity"].mean()), 2)
+    pct_high    = round(len(df[df["vote_average"] >= 7]) / total * 100, 1)
+    rating_dist = _rating_dist(df)
+    genre_stats = _genre_stats(df)
     top10 = df.nlargest(10, "popularity")[["title", "vote_average", "popularity", "genres"]].copy()
     top10_rows = [
         MovieRow(
@@ -523,15 +562,10 @@ def analytics_overview():
         )
         for _, r in top10.iterrows()
     ]
-
     return OverviewStats(
-        total_movies=total,
-        avg_rating=avg_rating,
-        avg_popularity=avg_pop,
-        pct_high=pct_high,
-        rating_dist=rating_dist,
-        genre_stats=genre_stats,
-        top10_popular=top10_rows,
+        total_movies=total, avg_rating=avg_rating, avg_popularity=avg_pop,
+        pct_high=pct_high, rating_dist=rating_dist,
+        genre_stats=genre_stats, top10_popular=top10_rows,
     )
 
 
@@ -542,26 +576,16 @@ def analytics_filtered(
     genre:      str   = Query("All"),
     min_pop:    float = Query(0.0),
 ):
-    """
-    Stats for the sidebar-filtered subset.
-    Used by dashboard KPI cards, Overview charts, Ratings tab.
-    """
     ensure_data_loaded()
     frame = _apply_filters(min_rating, max_rating, genre, min_pop)
-
     if len(frame) == 0:
-        return FilteredStats(
-            total=0, avg_rating=0.0, avg_popularity=0.0,
-            pct_high=0.0, rating_dist=[], popularity_by_rating=[],
-        )
-
+        return FilteredStats(total=0, avg_rating=0.0, avg_popularity=0.0,
+                             pct_high=0.0, rating_dist=[], popularity_by_rating=[])
     total      = len(frame)
     avg_rating = round(float(frame["vote_average"].mean()), 2)
     avg_pop    = round(float(frame["popularity"].mean()), 2)
     pct_high   = round(len(frame[frame["vote_average"] >= 7]) / total * 100, 1)
     rating_dist = _rating_dist(frame)
-
-    # Popularity by rating group (for bar chart in Overview tab)
     pool = frame[frame["popularity"] <= 300].copy()
     bins2   = [0, 2, 4, 5, 6, 7, 8, 9, 10.01]
     labels2 = ["0-2", "2-4", "4-5", "5-6", "6-7", "7-8", "8-9", "9-10"]
@@ -569,15 +593,10 @@ def analytics_filtered(
     grp = pool.groupby("bucket", observed=True)["popularity"].mean().reset_index()
     grp.columns = ["rating_group", "avg_popularity"]
     grp["avg_popularity"] = grp["avg_popularity"].round(2)
-    pop_by_rating = grp.to_dict(orient="records")
-
     return FilteredStats(
-        total=total,
-        avg_rating=avg_rating,
-        avg_popularity=avg_pop,
-        pct_high=pct_high,
-        rating_dist=rating_dist,
-        popularity_by_rating=pop_by_rating,
+        total=total, avg_rating=avg_rating, avg_popularity=avg_pop,
+        pct_high=pct_high, rating_dist=rating_dist,
+        popularity_by_rating=grp.to_dict(orient="records"),
     )
 
 
@@ -587,25 +606,15 @@ async def analytics_recommend(
     min_rating: float = Query(6.5),
     top_n:      int   = Query(50, ge=10, le=200),
 ):
-    """
-    Personalised recommendations for the dashboard 'Recommend Me' tab.
-    Deduplicates across all three buckets on the backend.
-    Fetches posters from TMDB concurrently.
-    """
     ensure_data_loaded()
     _ensure_df()
-
     rec_df = df[
         df["genres"].str.contains(genre, na=False) &
         (df["vote_average"] >= min_rating)
     ].copy()
-
     total_found = len(rec_df)
-
     if total_found == 0:
-        return RecommendResponse(
-            total_found=0, top_picks=[], highest_rated=[], trending=[]
-        )
+        return RecommendResponse(total_found=0, top_picks=[], highest_rated=[], trending=[])
 
     rec_df["score"] = (
         rec_df["vote_average"] * 0.7 +
@@ -618,7 +627,6 @@ async def analytics_recommend(
         if min_rating < 9.5 else rec_df.nlargest(top_n, "vote_average")
     )
 
-    # Deduplicate globally — title seen in top_picks won't appear in others
     global_seen: set = set()
 
     def dedup(frame: pd.DataFrame, n: int = 8) -> pd.DataFrame:
@@ -632,17 +640,16 @@ async def analytics_recommend(
                 break
         return pd.DataFrame(rows) if rows else pd.DataFrame()
 
-    top_df     = dedup(top_recs_df)
-    similar_df = dedup(similar_df)
+    top_df      = dedup(top_recs_df)
+    similar_df  = dedup(similar_df)
     trending_df = dedup(trending_df)
 
-    # Fetch posters concurrently for all titles across all three buckets
     all_titles = (
-        list(top_df["title"])     if len(top_df)      > 0 else []
+        list(top_df["title"])      if len(top_df)      > 0 else []
     ) + (
-        list(similar_df["title"]) if len(similar_df)  > 0 else []
+        list(similar_df["title"])  if len(similar_df)  > 0 else []
     ) + (
-        list(trending_df["title"])if len(trending_df) > 0 else []
+        list(trending_df["title"]) if len(trending_df) > 0 else []
     )
     poster_results = await asyncio.gather(*[tmdb_poster_for_title(t) for t in all_titles])
     poster_map     = dict(zip(all_titles, poster_results))
@@ -671,10 +678,6 @@ async def analytics_recommend(
 
 @app.get("/analytics/titles", response_model=AllTitlesResponse)
 def analytics_titles():
-    """
-    Returns all unique movie titles from the dataset.
-    Used by dashboard Compare Movies tab to populate dropdowns.
-    """
     ensure_data_loaded()
     _ensure_df()
     titles = sorted(df["title"].dropna().unique().tolist())
@@ -686,10 +689,6 @@ async def analytics_compare(
     title1: str = Query(..., min_length=1),
     title2: str = Query(..., min_length=1),
 ):
-    """
-    Returns full comparison data for two movie titles.
-    Fetches posters from TMDB concurrently.
-    """
     ensure_data_loaded()
     _ensure_df()
 
@@ -702,7 +701,6 @@ async def analytics_compare(
     r1 = get_row(title1)
     r2 = get_row(title2)
 
-    # Fetch both posters concurrently
     poster1, poster2 = await asyncio.gather(
         tmdb_poster_for_title(title1),
         tmdb_poster_for_title(title2),

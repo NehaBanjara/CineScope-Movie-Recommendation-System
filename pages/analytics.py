@@ -4,9 +4,9 @@ import plotly.graph_objects as go
 import streamlit as st
 
 # ─────────────────────────────────────────
-# CONFIG
+# CONFIG — LOCAL ONLY
 # ─────────────────────────────────────────
-API_BASE = os.getenv("API_BASE", "https://cinescope-movie-recommendation-system.onrender.com")
+API_BASE = "http://127.0.0.1:8000"
 
 st.set_page_config(
     page_title="CineScope — Analytics",
@@ -73,8 +73,6 @@ hr{{border-color:{C_BORDER}!important;}}
 .movie-table td{{padding:10px 14px;font-size:0.88rem;color:{C_TEXT};border-bottom:1px solid {C_BORDER}33;}}
 .movie-table tr:hover td{{background:{C_BORDER}33;}}
 .rating-pill{{background:rgba(245,197,24,0.15);color:{C_GOLD};padding:3px 10px;border-radius:20px;font-size:0.8rem;font-weight:600;}}
-.genre-tag{{background:rgba(124,111,205,0.15);color:{C_PURPLE};padding:2px 8px;border-radius:20px;font-size:0.75rem;display:inline-block;margin:1px;}}
-.pop-bar{{height:6px;border-radius:3px;background:linear-gradient(to right,{C_TEAL},{C_BLUE});display:inline-block;}}
 .dash-banner{{background:linear-gradient(135deg,#0f0c29,#1a1040,#0a1628);border-radius:0 0 20px 20px;padding:1.8rem 2rem 1.5rem;margin:-1rem -2rem 1.5rem;border-bottom:1px solid {C_BORDER};display:flex;align-items:center;justify-content:space-between;}}
 .dash-title{{font-family:'DM Serif Display';font-size:1.8rem;color:{C_TEXT};}}
 .dash-title span{{color:{C_GOLD};}}
@@ -104,7 +102,7 @@ hr{{border-color:{C_BORDER}!important;}}
 @st.cache_data(ttl=300)
 def api_get(path: str, params: dict | None = None):
     try:
-        r = requests.get(f"{API_BASE}{path}", params=params, timeout=60)
+        r = requests.get(f"{API_BASE}{path}", params=params, timeout=30)
         if r.status_code >= 400:
             return None, f"HTTP {r.status_code}: {r.text[:200]}"
         return r.json(), None
@@ -121,7 +119,6 @@ if ov_err or not overview:
 
 ALL_GENRES   = ["All"] + [g["genre"] for g in overview["genre_stats"]]
 TOTAL_MOVIES = overview["total_movies"]
-
 
 with st.sidebar:
     st.markdown(f"""
@@ -153,7 +150,6 @@ with st.sidebar:
         f"</div></div>",
         unsafe_allow_html=True,
     )
-
 
 filtered_stats, fs_err = api_get("/analytics/filtered", params={
     "min_rating": rating_range[0],
@@ -207,9 +203,6 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📊 Overview", "🎭 Genre Analysis", "⭐ Ratings", "🎬 Recommend Me", "⚡ Compare Movies",
 ])
 
-# ══════════════════════════════════════════
-# TAB 1 — OVERVIEW
-# ══════════════════════════════════════════
 with tab1:
     st.markdown("<div class='section-hdr'>Overview <span>DATASET SNAPSHOT</span></div>", unsafe_allow_html=True)
     global_rat_dist = overview["rating_dist"]
@@ -231,7 +224,6 @@ with tab1:
             labels=[g["genre"] for g in top6], values=[g["count"] for g in top6], hole=0.55,
             marker=dict(colors=[C_GOLD,C_PURPLE,C_TEAL,C_CORAL,C_BLUE,"#a78bfa"], line=dict(color=C_BG,width=2)),
             textinfo="label+percent", textfont=dict(size=11, color=C_TEXT),
-            hovertemplate="<b>%{label}</b><br>%{value:,} movies (%{percent})<extra></extra>",
         ))
         fig2.add_annotation(text=f"<b>{TOTAL_MOVIES:,}</b><br>movies", x=0.5, y=0.5, showarrow=False, font=dict(size=13, color=C_TEXT))
         fig2.update_layout(pl(title="Genre Distribution (Top 6)", legend=dict(orientation="v", x=1.05, y=0.5)))
@@ -247,9 +239,6 @@ with tab1:
         fig3.update_layout(pl(title="Average Popularity per Rating Group", xaxis_title="Rating Range", yaxis_title="Avg Popularity", bargap=0.2))
         st.plotly_chart(fig3, use_container_width=True)
 
-# ══════════════════════════════════════════
-# TAB 2 — GENRE ANALYSIS
-# ══════════════════════════════════════════
 with tab2:
     st.markdown("<div class='section-hdr'>Genre Analysis <span>BREAKDOWN</span></div>", unsafe_allow_html=True)
     genre_stats  = overview["genre_stats"]
@@ -262,7 +251,6 @@ with tab2:
             y=g_names, x=g_counts, orientation="h",
             marker=dict(color=g_counts, colorscale=[[0,C_PURPLE],[1,C_GOLD]], showscale=False, line=dict(width=0)),
             text=[f"{v:,}" for v in g_counts], textposition="outside", textfont=dict(color=C_MUTED, size=11),
-            hovertemplate="<b>%{y}</b><br>%{x:,} movies<extra></extra>",
         ))
         fig.update_layout(pl(title="Movies per Genre", height=400, yaxis=dict(autorange="reversed")))
         st.plotly_chart(fig, use_container_width=True)
@@ -280,26 +268,29 @@ with tab2:
     top8_genres   = [g["genre"] for g in genre_stats[:8]]
     bucket_labels = ["0-4","4-5","5-6","6-7","7-8","8-10"]
     bucket_ranges = [(0.0,4.0),(4.0,5.0),(5.0,6.0),(6.0,7.0),(7.0,8.0),(8.0,10.0)]
-    heat_data = []
-    for genre in top8_genres:
-        row_vals = []
-        for bmin, bmax in bucket_ranges:
-            cell, _ = api_get("/analytics/filtered", params={"min_rating":bmin,"max_rating":bmax,"genre":genre,"min_pop":0.0})
-            row_vals.append(cell["total"] if cell else 0)
-        heat_data.append(row_vals)
+
+    @st.cache_data(ttl=600)
+    def get_heatmap_data(genres_key: str):
+        genres = genres_key.split(",")
+        result = []
+        for g in genres:
+            row_vals = []
+            for bmin, bmax in bucket_ranges:
+                cell, _ = api_get("/analytics/filtered", params={"min_rating":bmin,"max_rating":bmax,"genre":g,"min_pop":0.0})
+                row_vals.append(cell["total"] if cell else 0)
+            result.append(row_vals)
+        return result
+
+    heat_data = get_heatmap_data(",".join(top8_genres))
     fig_heat = go.Figure(go.Heatmap(
         z=heat_data, x=bucket_labels, y=top8_genres,
         colorscale=[[0,C_SURFACE],[0.3,C_PURPLE],[0.7,C_GOLD],[1,C_TEAL]],
-        hovertemplate="Genre: <b>%{y}</b><br>Rating: <b>%{x}</b><br>Movies: <b>%{z:,}</b><extra></extra>",
         text=[[f"{v:,}" for v in row] for row in heat_data],
         texttemplate="%{text}", textfont=dict(size=10, color=C_TEXT),
     ))
     fig_heat.update_layout(pl(title="Number of Movies — Genre vs Rating Range", height=380))
     st.plotly_chart(fig_heat, use_container_width=True)
 
-# ══════════════════════════════════════════
-# TAB 3 — RATINGS
-# ══════════════════════════════════════════
 with tab3:
     st.markdown("<div class='section-hdr'>Ratings Deep Dive <span>ANALYSIS</span></div>", unsafe_allow_html=True)
     rd_ranges = [b["range"] for b in f_rat_dist]
@@ -311,7 +302,6 @@ with tab3:
         marker=dict(color=colors_rd[:len(rd_ranges)], opacity=0.88, line=dict(width=0)),
         text=[f"{c:,}\n({p}%)" for c,p in zip(rd_counts,rd_pcts)],
         textposition="outside", textfont=dict(color=C_MUTED, size=11),
-        hovertemplate="<b>Rating %{x}</b><br>%{y:,} movies<extra></extra>",
     ))
     mean_bucket_idx = min(range(len(rd_ranges)), key=lambda i: abs(float(rd_ranges[i].split("-")[0]) - f_avg_r)) if rd_ranges else 0
     fig_rd.add_vline(x=mean_bucket_idx, line_dash="dot", line_color=C_GOLD, line_width=1.5,
@@ -339,9 +329,6 @@ with tab3:
     fig_tier.update_layout(pl(title="Quality Tiers", height=320, yaxis=dict(autorange="reversed"), showlegend=False))
     st.plotly_chart(fig_tier, use_container_width=True)
 
-# ══════════════════════════════════════════
-# TAB 4 — RECOMMEND ME
-# ══════════════════════════════════════════
 with tab4:
     st.markdown("<div class='section-hdr'>Recommend Me Movies <span>Personalized</span></div>", unsafe_allow_html=True)
     rc1, rc2 = st.columns(2)
@@ -354,7 +341,7 @@ with tab4:
         rec_data, rec_err = api_get("/analytics/recommend", params={"genre":rec_genre,"min_rating":rec_rating,"top_n":50})
 
     if rec_err or not rec_data:
-        st.warning("⚠️ Could not load recommendations. Check backend connection.")
+        st.warning("⚠️ Could not load recommendations.")
     elif rec_data["total_found"] == 0:
         st.warning("No movies found. Try lowering the rating filter.")
     else:
@@ -387,19 +374,14 @@ with tab4:
                         unsafe_allow_html=True,
                     )
 
-# ══════════════════════════════════════════
-# TAB 5 — COMPARE MOVIES
-# ✅ FIX: st.stop() removed from inside tab — was killing all other tabs
-# ══════════════════════════════════════════
 with tab5:
     st.markdown("<div class='section-hdr'>Compare Movies <span>HEAD TO HEAD</span></div>", unsafe_allow_html=True)
 
     with st.spinner("Loading movie titles..."):
         titles_data, titles_err = api_get("/analytics/titles")
 
-    # ✅ FIXED: was st.stop() — now shows error inside tab only, doesn't kill other tabs
     if titles_err or not titles_data:
-        st.warning("⚠️ Could not load movie titles from backend. Backend may be loading, wait 30s and refresh.")
+        st.warning("⚠️ Could not load movie titles. Make sure FastAPI is running.")
     else:
         all_titles = titles_data["titles"]
         cc1, cc2 = st.columns(2)
@@ -414,15 +396,15 @@ with tab5:
             compare_data, cmp_err = api_get("/analytics/compare", params={"title1":movie1,"title2":movie2})
 
         if cmp_err or not compare_data:
-            st.warning(f"⚠️ Could not compare movies: {cmp_err}")
+            st.warning(f"⚠️ Could not compare: {cmp_err}")
         else:
             m1 = compare_data["movie1"]
             m2 = compare_data["movie2"]
             rating1, rating2 = m1["vote_average"], m2["vote_average"]
             pop1, pop2       = m1["popularity"],    m2["popularity"]
-            genres1, genres2 = m1["genres"],         m2["genres"]
+            genres1, genres2 = m1["genres"],        m2["genres"]
             common           = set(genres1) & set(genres2)
-            ov_len1, ov_len2 = m1["overview_len"],   m2["overview_len"]
+            ov_len1, ov_len2 = m1["overview_len"],  m2["overview_len"]
             rating_winner    = movie1 if rating1 >= rating2 else movie2
             pop_winner       = movie1 if pop1    >= pop2    else movie2
 
@@ -483,4 +465,3 @@ with tab5:
                     <td>{abs(ov_len1-ov_len2)} words</td><td>—</td></tr>
                 </tbody>
             </table></div>""", unsafe_allow_html=True)
-            st.markdown("<br>", unsafe_allow_html=True)

@@ -2,6 +2,7 @@ import os
 import pickle
 import threading
 import asyncio
+import ssl
 from collections import Counter
 from typing import Optional, List, Dict, Any, Tuple
 
@@ -184,16 +185,79 @@ def make_img_url(path: Optional[str]) -> Optional[str]:
     return f"{TMDB_IMG_500}{path}" if path else None
 
 
-async def tmdb_get(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
+def _make_ssl_context() -> ssl.SSLContext:
+    """Create a permissive SSL context to avoid certificate verification issues."""
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
+async def tmdb_get(path: str, params: Dict[str, Any], retries: int = 3) -> Dict[str, Any]:
+    """
+    Fetch from TMDB API with retry logic and robust SSL/connection handling.
+    Tries multiple approaches if the first fails.
+    """
     q = {**params, "api_key": TMDB_API_KEY}
-    async with httpx.AsyncClient(timeout=15, verify=False) as client:
+    url = f"{TMDB_BASE}{path}"
+    last_error: Optional[Exception] = None
+
+    # Strategy 1: Standard httpx with verify=False
+    for attempt in range(retries):
         try:
-            r = await client.get(f"{TMDB_BASE}{path}", params=q)
-        except httpx.RequestError as exc:
-            raise HTTPException(502, f"TMDB unreachable: {exc}")
-    if r.status_code != 200:
-        raise HTTPException(502, f"TMDB error {r.status_code}")
-    return r.json()
+            async with httpx.AsyncClient(
+                verify=False,
+                timeout=httpx.Timeout(30.0, connect=10.0),
+                follow_redirects=True,
+            ) as client:
+                r = await client.get(url, params=q)
+                if r.status_code == 200:
+                    return r.json()
+                elif r.status_code == 401:
+                    raise HTTPException(401, "Invalid TMDB API key — check your .env file")
+                elif r.status_code == 404:
+                    raise HTTPException(404, f"TMDB resource not found: {path}")
+                elif r.status_code >= 500:
+                    last_error = Exception(f"TMDB server error {r.status_code}")
+                    if attempt < retries - 1:
+                        await asyncio.sleep(1.0 * (attempt + 1))
+                    continue
+                else:
+                    raise HTTPException(502, f"TMDB error {r.status_code}: {r.text[:200]}")
+        except HTTPException:
+            raise
+        except (httpx.ConnectError, httpx.TimeoutException, httpx.NetworkError) as e:
+            last_error = e
+            if attempt < retries - 1:
+                await asyncio.sleep(1.5 * (attempt + 1))
+            continue
+        except Exception as e:
+            last_error = e
+            if attempt < retries - 1:
+                await asyncio.sleep(1.0)
+            continue
+
+    # Strategy 2: Try with custom SSL context via httpcore transport
+    try:
+        ssl_ctx = _make_ssl_context()
+        transport = httpx.AsyncHTTPTransport(verify=ssl_ctx, retries=2)
+        async with httpx.AsyncClient(
+            transport=transport,
+            timeout=httpx.Timeout(45.0, connect=15.0),
+            follow_redirects=True,
+        ) as client:
+            r = await client.get(url, params=q)
+            if r.status_code == 200:
+                return r.json()
+    except Exception as e:
+        last_error = e
+
+    error_msg = str(last_error) if last_error else "Unknown connection error"
+    raise HTTPException(
+        502,
+        f"TMDB unreachable after {retries} attempts. "
+        f"Check your internet connection or VPN. Error: {error_msg}"
+    )
 
 
 async def tmdb_cards_from_results(results: List[dict], limit: int = 20) -> List[TMDBMovieCard]:
@@ -239,10 +303,25 @@ async def tmdb_search_first(query: str) -> Optional[dict]:
 
 
 async def tmdb_poster_for_title(title: str) -> Optional[str]:
+    """Fetch poster with short timeout so batch fetches don't hang."""
     try:
-        m = await tmdb_search_first(title)
-        if m and m.get("poster_path"):
-            return make_img_url(m["poster_path"])
+        q = {
+            "query": title,
+            "include_adult": "false",
+            "language": "en-US",
+            "page": 1,
+            "api_key": TMDB_API_KEY,
+        }
+        async with httpx.AsyncClient(
+            verify=False,
+            timeout=httpx.Timeout(8.0, connect=5.0),
+            follow_redirects=True,
+        ) as client:
+            r = await client.get(f"{TMDB_BASE}/search/movie", params=q)
+        if r.status_code == 200:
+            results = r.json().get("results", [])
+            if results and results[0].get("poster_path"):
+                return make_img_url(results[0]["poster_path"])
     except Exception:
         pass
     return None
@@ -424,37 +503,36 @@ async def home_by_genre(
     limit: int = Query(24, ge=1, le=50),
     page:  int = Query(1,  ge=1, le=5),
 ):
+    hardcoded = {
+        "drama": 18, "comedy": 35, "action": 28, "thriller": 53,
+        "romance": 10749, "horror": 27, "animation": 16, "fantasy": 14,
+        "crime": 80, "adventure": 12, "family": 10751, "mystery": 9648,
+        "history": 36, "war": 10752, "western": 37,
+        "music": 10402, "documentary": 99, "science fiction": 878, "science": 878,
+    }
+    genre_id = GENRE_NAME_TO_ID.get(genre) or hardcoded.get(genre.lower())
+
+    for pg in [page, 1, 2]:
+        try:
+            if genre_id:
+                data = await tmdb_get(
+                    "/discover/movie",
+                    {"with_genres": genre_id, "language": "en-US",
+                     "sort_by": "popularity.desc", "page": pg},
+                )
+            else:
+                data = await tmdb_get("/movie/popular", {"language": "en-US", "page": pg})
+            results = data.get("results", [])
+            if results:
+                return await tmdb_cards_from_results(results, limit=limit)
+        except Exception:
+            continue
+
     try:
-        genre_id = GENRE_NAME_TO_ID.get(genre)
-        if not genre_id:
-            for key, gid in GENRE_NAME_TO_ID.items():
-                if key.lower() in genre.lower() or genre.lower() in key.lower():
-                    genre_id = gid
-                    break
-        # Hardcoded fallbacks for genres that sometimes miss
-        if not genre_id:
-            hardcoded = {
-                "horror": 27, "comedy": 35, "action": 28,
-                "drama": 18, "thriller": 53, "romance": 10749,
-                "animation": 16, "fantasy": 14, "crime": 80,
-                "adventure": 12, "family": 10751, "mystery": 9648,
-                "history": 36, "war": 10752, "western": 37,
-                "music": 10402, "documentary": 99,
-            }
-            genre_id = hardcoded.get(genre.lower())
-        if not genre_id:
-            data = await tmdb_get("/movie/popular", {"language": "en-US", "page": page})
-            return await tmdb_cards_from_results(data.get("results", []), limit=limit)
-        data = await tmdb_get(
-            "/discover/movie",
-            {"with_genres": genre_id, "language": "en-US", "sort_by": "popularity.desc",
-             "page": page, "vote_count.gte": 50},
-        )
+        data = await tmdb_get("/movie/popular", {"language": "en-US", "page": 1})
         return await tmdb_cards_from_results(data.get("results", []), limit=limit)
-    except HTTPException:
-        raise
     except Exception as e:
-        raise HTTPException(500, f"Genre home route failed: {e}")
+        raise HTTPException(502, f"Could not fetch movies: {e}")
 
 
 @app.get("/tmdb/search")
